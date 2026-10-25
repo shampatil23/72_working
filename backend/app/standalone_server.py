@@ -19,16 +19,17 @@ from typing import Any, Literal
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query, Request, Response, status
+from fastapi import FastAPI, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image, ImageDraw
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
 # Configuration & Environment
 # ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent
 REPO_DIR = BASE_DIR.parent
+
 
 def load_env_file(path: Path) -> dict[str, str]:
     env: dict[str, str] = {}
@@ -48,7 +49,12 @@ def load_env_file(path: Path) -> dict[str, str]:
                 env[k] = v
     return env
 
-env_vars = {**load_env_file(REPO_DIR / ".env"), **load_env_file(BASE_DIR / ".env"), **dict(os.environ)}
+
+env_vars = {
+    **load_env_file(REPO_DIR / ".env"),
+    **load_env_file(BASE_DIR / ".env"),
+    **dict(os.environ),
+}
 
 APP_NAME = env_vars.get("APP_NAME", "JalNetra")
 APP_ENV = env_vars.get("APP_ENV", "dev")
@@ -62,7 +68,10 @@ OPENAI_MODEL = env_vars.get("OPENAI_MODEL", "gpt-4o-mini")
 TELEGRAM_BOT_TOKEN = env_vars.get("TELEGRAM_BOT_TOKEN", "")
 IOT_ENDPOINT = env_vars.get("IOT_ENDPOINT", "http://192.168.244.250/")
 
-logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
 log = logging.getLogger("jalnetra.standalone")
 
 DISCLAIMER = "Satellite-observed anomaly. Ground and laboratory testing recommended for validation."
@@ -79,11 +88,17 @@ ALERTS: dict[str, dict[str, Any]] = {}
 WISHLIST: list[dict[str, Any]] = []
 RECENT_HISTORY: list[str] = []
 
+
 def _calc_bbox_and_centroid(geometry: dict[str, Any]) -> tuple[list[float], list[float], float]:
     coords_list: list[tuple[float, float]] = []
-    
+
     def extract_coords(obj: Any) -> None:
-        if isinstance(obj, list) and len(obj) >= 2 and isinstance(obj[0], (int, float)) and isinstance(obj[1], (int, float)):
+        if (
+            isinstance(obj, list)
+            and len(obj) >= 2
+            and isinstance(obj[0], (int, float))
+            and isinstance(obj[1], (int, float))
+        ):
             coords_list.append((float(obj[0]), float(obj[1])))
         elif isinstance(obj, list):
             for item in obj:
@@ -92,21 +107,28 @@ def _calc_bbox_and_centroid(geometry: dict[str, Any]) -> tuple[list[float], list
     extract_coords(geometry.get("coordinates", []))
     if not coords_list:
         return [73.5, 18.2, 73.8, 18.5], [73.65, 18.35], 5.0
-    
+
     lons = [c[0] for c in coords_list]
     lats = [c[1] for c in coords_list]
     min_lon, max_lon = min(lons), max(lons)
     min_lat, max_lat = min(lats), max(lats)
     c_lon = sum(lons) / len(lons)
     c_lat = sum(lats) / len(lats)
-    
+
     span_x = (max_lon - min_lon) * 111.0 * math.cos(math.radians(c_lat))
     span_y = (max_lat - min_lat) * 111.0
     approx_area = max(0.5, round(span_x * span_y * 0.45, 1))
-    
-    return [round(min_lon, 5), round(min_lat, 5), round(max_lon, 5), round(max_lat, 5)], [round(c_lon, 5), round(c_lat, 5)], approx_area
 
-def _generate_zones(wb_id: str, wb_name: str, bbox: list[float], centroid: list[float], area_km2: float) -> list[dict[str, Any]]:
+    return (
+        [round(min_lon, 5), round(min_lat, 5), round(max_lon, 5), round(max_lat, 5)],
+        [round(c_lon, 5), round(c_lat, 5)],
+        approx_area,
+    )
+
+
+def _generate_zones(
+    wb_id: str, wb_name: str, bbox: list[float], centroid: list[float], area_km2: float
+) -> list[dict[str, Any]]:
     min_lon, min_lat, max_lon, max_lat = bbox
     k = max(4, min(8, int(4 + max(0.0, area_km2 - 5.0) // 6.0)))
     names = [
@@ -119,44 +141,51 @@ def _generate_zones(wb_id: str, wb_name: str, bbox: list[float], centroid: list[
         "Dam wall / spillway",
         "Western catchment",
     ]
-    
+
     zones = []
     d_lon = (max_lon - min_lon) / k
     d_lat = (max_lat - min_lat) / k
-    
+
     for i in range(k):
-        z_id = f"{wb_id}_z{i+1}"
-        z_name = f"Zone {i+1} — {names[i % len(names)]}"
+        z_id = f"{wb_id}_z{i + 1}"
+        z_name = f"Zone {i + 1} — {names[i % len(names)]}"
         z_min_lon = min_lon + i * d_lon
         z_max_lon = min_lon + (i + 1) * d_lon
         z_min_lat = min_lat + (i % 2) * (d_lat * 0.5)
         z_max_lat = max_lat - ((i + 1) % 2) * (d_lat * 0.5)
-        
+
         z_geom = {
             "type": "Polygon",
-            "coordinates": [[
-                [z_min_lon, z_min_lat],
-                [z_max_lon, z_min_lat],
-                [z_max_lon, z_max_lat],
-                [z_min_lon, z_max_lat],
-                [z_min_lon, z_min_lat],
-            ]]
+            "coordinates": [
+                [
+                    [z_min_lon, z_min_lat],
+                    [z_max_lon, z_min_lat],
+                    [z_max_lon, z_max_lat],
+                    [z_min_lon, z_max_lat],
+                    [z_min_lon, z_min_lat],
+                ]
+            ],
         }
-        
-        zones.append({
-            "type": "Feature",
-            "id": z_id,
-            "geometry": z_geom,
-            "properties": {
+
+        zones.append(
+            {
+                "type": "Feature",
                 "id": z_id,
-                "name": z_name,
-                "seq": i + 1,
-                "area_km2": round(area_km2 / k, 2),
-                "baseline_status": "usable",
-                "open_alert_id": f"alert_{wb_id}_z{i+1}" if (i == 0 and "khadakwasla" in wb_id) else None,
+                "geometry": z_geom,
+                "properties": {
+                    "id": z_id,
+                    "name": z_name,
+                    "seq": i + 1,
+                    "area_km2": round(area_km2 / k, 2),
+                    "baseline_status": "usable",
+                    "open_alert_id": f"alert_{wb_id}_z{i + 1}"
+                    if (i == 0 and "khadakwasla" in wb_id)
+                    else None,
+                },
             }
-        })
+        )
     return zones
+
 
 def init_seed_data() -> None:
     for geojson_path, default_district in [(PUNE_FILE, "Pune"), (NAGPUR_FILE, "Nagpur")]:
@@ -175,10 +204,10 @@ def init_seed_data() -> None:
                 district = props.get("district", default_district)
                 kind = props.get("kind", "reservoir")
                 tier = int(props.get("tier", 1))
-                
+
                 bbox, centroid, area_km2 = _calc_bbox_and_centroid(geom)
                 zones = _generate_zones(wb_id, name, bbox, centroid, area_km2)
-                
+
                 WATER_BODIES[wb_id] = {
                     "id": wb_id,
                     "name": name,
@@ -204,7 +233,7 @@ def init_seed_data() -> None:
                         "cloud_pct": 4.8,
                         "usable": True,
                         "stage": "alerted" if "khadakwasla" in wb_id else "indicators",
-                    }
+                    },
                 }
         except Exception as e:
             log.error(f"Error loading {geojson_path}: {e}")
@@ -285,12 +314,36 @@ def init_seed_data() -> None:
                 },
             ],
             "explanation": {
-                "summary": "Satellite observation indicates elevated NDTI (+5.50σ) covering 2.45 km² under dry weather conditions (72h rain: 0.0 mm).",
+                "summary": "Satellite observation indicates elevated NDTI (+5.50 sigma) covering 2.45 km² under dry weather conditions (72h rain: 0.0 mm).",
                 "contributions": [
-                    {"factor": "deviation", "value": 45.0, "key": "ndti_turbidity", "raw": 5.5, "parts": {"ndti": 45.0}},
-                    {"factor": "extent", "value": 20.0, "key": "area", "raw": 2.45, "parts": {"km2": 20.0}},
-                    {"factor": "corroboration", "value": 19.5, "key": "sediment_proxy", "raw": 3.3, "parts": {"sediment": 19.5}},
-                    {"factor": "rainfall", "value": 0.0, "key": "rain_gate", "raw": 0.0, "parts": {"discount": 0.0}},
+                    {
+                        "factor": "deviation",
+                        "value": 45.0,
+                        "key": "ndti_turbidity",
+                        "raw": 5.5,
+                        "parts": {"ndti": 45.0},
+                    },
+                    {
+                        "factor": "extent",
+                        "value": 20.0,
+                        "key": "area",
+                        "raw": 2.45,
+                        "parts": {"km2": 20.0},
+                    },
+                    {
+                        "factor": "corroboration",
+                        "value": 19.5,
+                        "key": "sediment_proxy",
+                        "raw": 3.3,
+                        "parts": {"sediment": 19.5},
+                    },
+                    {
+                        "factor": "rainfall",
+                        "value": 0.0,
+                        "key": "rain_gate",
+                        "raw": 0.0,
+                        "parts": {"discount": 0.0},
+                    },
                 ],
             },
             "context": {
@@ -333,8 +386,10 @@ def init_seed_data() -> None:
             ],
         }
 
+
 init_seed_data()
 log.info(f"Loaded {len(WATER_BODIES)} water bodies into memory.")
+
 
 # ---------------------------------------------------------------------------
 # High-Performance Dynamic Raster Tile Generator
@@ -345,17 +400,20 @@ def _make_transparent_png() -> bytes:
     img.save(buf, format="PNG")
     return buf.getvalue()
 
+
 TRANSPARENT_TILE_PNG = _make_transparent_png()
 TILE_CACHE: dict[str, bytes] = {}
 MAX_TILE_CACHE = 2000
 
+
 def num2deg(xtile: int, ytile: int, zoom: int) -> tuple[float, float]:
     """Convert tile X, Y, Z to latitude and longitude (WGS84) of top-left corner."""
-    n = 2.0 ** zoom
+    n = 2.0**zoom
     lon_deg = xtile / n * 360.0 - 180.0
     lat_rad = math.atan(math.sinh(math.pi * (1.0 - 2.0 * ytile / n)))
     lat_deg = math.degrees(lat_rad)
     return lat_deg, lon_deg
+
 
 def tile_bounds(z: int, x: int, y: int) -> tuple[float, float, float, float]:
     """Returns [min_lon, min_lat, max_lon, max_lat] for tile (z, x, y)."""
@@ -363,24 +421,26 @@ def tile_bounds(z: int, x: int, y: int) -> tuple[float, float, float, float]:
     lat_min, lon_max = num2deg(x + 1, y + 1, z)
     return lon_min, lat_min, lon_max, lat_max
 
+
 LAYER_PALETTES: dict[str, tuple[tuple[int, int, int, int], tuple[int, int, int, int]]] = {
-    "ndti_turbidity": ((245, 158, 11, 160), (220, 38, 38, 190)),   # Amber -> Crimson red
+    "ndti_turbidity": ((245, 158, 11, 160), (220, 38, 38, 190)),  # Amber -> Crimson red
     "ndti": ((245, 158, 11, 160), (220, 38, 38, 190)),
     "turbidity": ((245, 158, 11, 160), (220, 38, 38, 190)),
     "ndci_chlorophyll": ((34, 197, 94, 160), (21, 128, 61, 190)),  # Emerald green -> Forest green
     "ndci": ((34, 197, 94, 160), (21, 128, 61, 190)),
     "chlorophyll": ((34, 197, 94, 160), (21, 128, 61, 190)),
-    "fai_algal": ((132, 204, 22, 160), (101, 163, 13, 190)),       # Chartreuse algae
+    "fai_algal": ((132, 204, 22, 160), (101, 163, 13, 190)),  # Chartreuse algae
     "fai": ((132, 204, 22, 160), (101, 163, 13, 190)),
-    "sediment_proxy": ((234, 88, 12, 160), (180, 83, 9, 190)),     # Terracotta sediment
+    "sediment_proxy": ((234, 88, 12, 160), (180, 83, 9, 190)),  # Terracotta sediment
     "sediment": ((234, 88, 12, 160), (180, 83, 9, 190)),
-    "mndwi_extent": ((14, 165, 233, 150), (2, 132, 199, 180)),     # Aquatic cyan
+    "mndwi_extent": ((14, 165, 233, 150), (2, 132, 199, 180)),  # Aquatic cyan
     "extent": ((14, 165, 233, 150), (2, 132, 199, 180)),
     "mndwi": ((14, 165, 233, 150), (2, 132, 199, 180)),
-    "watermask": ((31, 119, 180, 160), (31, 119, 180, 190)),       # Deep blue mask
+    "watermask": ((31, 119, 180, 160), (31, 119, 180, 190)),  # Deep blue mask
     "mask": ((31, 119, 180, 160), (31, 119, 180, 190)),
-    "anomaly": ((239, 68, 68, 190), (185, 28, 28, 220)),           # Hotspot alert red
+    "anomaly": ((239, 68, 68, 190), (185, 28, 28, 220)),  # Hotspot alert red
 }
+
 
 def generate_raster_tile(layer: str, wb_id: str, z: int, x: int, y: int) -> bytes:
     """Generate dynamic raster tile clipped to water body boundary with authentic styling."""
@@ -390,15 +450,19 @@ def generate_raster_tile(layer: str, wb_id: str, z: int, x: int, y: int) -> byte
 
     wb = WATER_BODIES.get(wb_id)
     t_min_lon, t_min_lat, t_max_lon, t_max_lat = tile_bounds(z, x, y)
-    
+
     # If water body is known, check bounding box intersection
     if wb:
         w_min_lon, w_min_lat, w_max_lon, w_max_lat = wb["bbox"]
         # Allow slight padding
         pad_lon = (t_max_lon - t_min_lon) * 0.1
         pad_lat = (t_max_lat - t_min_lat) * 0.1
-        if (t_max_lon < w_min_lon - pad_lon or t_min_lon > w_max_lon + pad_lon or
-            t_max_lat < w_min_lat - pad_lat or t_min_lat > w_max_lat + pad_lat):
+        if (
+            t_max_lon < w_min_lon - pad_lon
+            or t_min_lon > w_max_lon + pad_lon
+            or t_max_lat < w_min_lat - pad_lat
+            or t_min_lat > w_max_lat + pad_lat
+        ):
             return TRANSPARENT_TILE_PNG
 
     palette = LAYER_PALETTES.get(layer.lower(), LAYER_PALETTES["ndti_turbidity"])
@@ -453,6 +517,7 @@ def generate_raster_tile(layer: str, wb_id: str, z: int, x: int, y: int) -> byte
         TILE_CACHE[cache_key] = tile_bytes
     return tile_bytes
 
+
 # ---------------------------------------------------------------------------
 # Minimal PDF Generator for Reports & Briefs
 # ---------------------------------------------------------------------------
@@ -460,27 +525,33 @@ def make_simple_pdf(title: str, lines: list[str]) -> bytes:
     clean_title = title.replace("\u2014", "-").replace("—", "-")
     clean_lines = []
     for line in lines:
-        sanitized = line.replace("\u2014", "-").replace("—", "-").replace("(", "[").replace(")", "]")
+        sanitized = (
+            line.replace("\u2014", "-").replace("—", "-").replace("(", "[").replace(")", "]")
+        )
         clean_lines.append(sanitized)
-    
+
     stream = f"BT /F1 16 Tf 50 780 Td ({clean_title}) Tj 0 -30 Td /F1 10 Tf\n"
-    for l in clean_lines:
-        stream += f"({l}) Tj 0 -16 Td\n"
+    for line_str in clean_lines:
+        stream += f"({line_str}) Tj 0 -16 Td\n"
     stream += "ET"
     stream_bytes = stream.encode("latin1", errors="replace")
     length = len(stream_bytes)
-    
+
     pdf = (
         b"%PDF-1.4\n"
         b"1 0 obj <</Type /Catalog /Pages 2 0 R>> endobj\n"
         b"2 0 obj <</Type /Pages /Kids [3 0 R] /Count 1>> endobj\n"
         b"3 0 obj <</Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources <</Font <</F1 5 0 R>>>>>> endobj\n"
-        b"4 0 obj <</Length " + str(length).encode("ascii") + b">> stream\n"
-        + stream_bytes + b"\nendstream\nendobj\n"
+        b"4 0 obj <</Length "
+        + str(length).encode("ascii")
+        + b">> stream\n"
+        + stream_bytes
+        + b"\nendstream\nendobj\n"
         b"5 0 obj <</Type /Font /Subtype /Type1 /BaseFont /Helvetica>> endobj\n"
         b"trailer <</Size 6 /Root 1 0 R>>\nstartxref\n250\n%%EOF"
     )
     return pdf
+
 
 # ---------------------------------------------------------------------------
 # FastAPI Application
@@ -500,6 +571,7 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
+
 # ---------------------------------------------------------------------------
 # Health & Status
 # ---------------------------------------------------------------------------
@@ -518,9 +590,14 @@ async def health():
         },
     }
 
+
 @app.get("/metrics")
 async def metrics():
-    return Response(content=f"# JalNetra metrics\njalnetra_water_bodies_total {len(WATER_BODIES)}\n", media_type="text/plain")
+    return Response(
+        content=f"# JalNetra metrics\njalnetra_water_bodies_total {len(WATER_BODIES)}\n",
+        media_type="text/plain",
+    )
+
 
 @app.get("/tiles/styles")
 async def tile_styles():
@@ -569,6 +646,7 @@ async def tile_styles():
         },
     }
 
+
 # ---------------------------------------------------------------------------
 # Raster Tile Routes (Leaflet XYZ)
 # ---------------------------------------------------------------------------
@@ -582,6 +660,7 @@ async def get_layer_tile(layer: str, water_body_id: str, on: str, z: int, x: int
         headers={"Cache-Control": "public, max-age=3600"},
     )
 
+
 @app.get("/tiles/{layer}/{water_body_id}/{z}/{x}/{y}.png")
 async def get_layer_tile_nodate(layer: str, water_body_id: str, z: int, x: int, y: int):
     """Fallback without date parameter."""
@@ -591,6 +670,7 @@ async def get_layer_tile_nodate(layer: str, water_body_id: str, z: int, x: int, 
         media_type="image/png",
         headers={"Cache-Control": "public, max-age=3600"},
     )
+
 
 @app.get("/tiles/chip/{chip_key:path}/{z}/{x}/{y}.png")
 async def get_chip_tile(chip_key: str, z: int, x: int, y: int):
@@ -611,6 +691,7 @@ async def get_chip_tile(chip_key: str, z: int, x: int, y: int):
         headers={"Cache-Control": "public, max-age=3600"},
     )
 
+
 @app.get("/tiles/{z}/{x}/{y}.png")
 async def get_raw_tile(z: int, x: int, y: int):
     """Catch-all tile fallback."""
@@ -619,6 +700,7 @@ async def get_raw_tile(z: int, x: int, y: int):
         media_type="image/png",
         headers={"Cache-Control": "public, max-age=3600"},
     )
+
 
 # ---------------------------------------------------------------------------
 # Water Bodies API
@@ -641,6 +723,7 @@ def _wb_summary(wb: dict[str, Any]) -> dict[str, Any]:
         "baseline_status": wb["baseline_status"],
     }
 
+
 @app.get("/api/v1/water-bodies")
 async def list_water_bodies(district: str | None = None, tier: int | None = None, limit: int = 50):
     items = list(WATER_BODIES.values())
@@ -648,9 +731,10 @@ async def list_water_bodies(district: str | None = None, tier: int | None = None
         items = [wb for wb in items if wb["district"].lower() == district.lower()]
     if tier:
         items = [wb for wb in items if wb["tier"] == tier]
-    
+
     clean_items = [_wb_summary(wb) for wb in items[:limit]]
     return {"items": clean_items, "total": len(items), "next_cursor": None}
+
 
 # ---------------------------------------------------------------------------
 # Discovery & Dynamic Registration
@@ -661,41 +745,46 @@ async def place_suggestions(q: str = Query("", min_length=1), limit: int = 5):
     matches = []
     for wb in WATER_BODIES.values():
         if query in wb["name"].lower() or query in wb["district"].lower():
-            matches.append({
-                "lat": wb["centroid"][1],
-                "lon": wb["centroid"][0],
-                "display_name": f"{wb['name']}, {wb['district']}, Maharashtra",
-                "district": wb["district"],
-                "state": "Maharashtra",
-            })
+            matches.append(
+                {
+                    "lat": wb["centroid"][1],
+                    "lon": wb["centroid"][0],
+                    "display_name": f"{wb['name']}, {wb['district']}, Maharashtra",
+                    "district": wb["district"],
+                    "state": "Maharashtra",
+                }
+            )
             if len(matches) >= limit:
                 break
     return {"query": q, "items": matches}
+
 
 @app.post("/api/v1/water-bodies/discover")
 async def discover_at_point(req: dict[str, Any]):
     lat = float(req.get("latitude", 18.5))
     lon = float(req.get("longitude", 73.8))
     radius_km = float(req.get("radius_km", 20.0))
-    
+
     items = []
     for wb in WATER_BODIES.values():
         wb_lon, wb_lat = wb["centroid"]
         dist = math.hypot((wb_lon - lon) * 111.0, (wb_lat - lat) * 111.0)
         if dist <= radius_km:
-            items.append({
-                "osm_id": f"way/{wb['id']}",
-                "name": wb["name"],
-                "kind": wb["kind"],
-                "osm_water_tag": wb["kind"],
-                "area_km2": wb["area_km2"],
-                "suggested_tier": wb["tier"],
-                "centroid": wb["centroid"],
-                "bbox": wb["bbox"],
-                "distance_km": round(dist, 1),
-                "geometry": wb["boundary"],
-                "already_registered_id": wb["id"],
-            })
+            items.append(
+                {
+                    "osm_id": f"way/{wb['id']}",
+                    "name": wb["name"],
+                    "kind": wb["kind"],
+                    "osm_water_tag": wb["kind"],
+                    "area_km2": wb["area_km2"],
+                    "suggested_tier": wb["tier"],
+                    "centroid": wb["centroid"],
+                    "bbox": wb["bbox"],
+                    "distance_km": round(dist, 1),
+                    "geometry": wb["boundary"],
+                    "already_registered_id": wb["id"],
+                }
+            )
     return {
         "centre": [lon, lat],
         "radius_km": radius_km,
@@ -703,25 +792,28 @@ async def discover_at_point(req: dict[str, Any]):
         "total": len(items),
     }
 
+
 @app.post("/api/v1/water-bodies/search-and-discover")
 async def search_and_discover(req: dict[str, Any]):
     query = req.get("query", "").strip().lower()
     items = []
     for wb in WATER_BODIES.values():
         if query in wb["name"].lower() or query in wb["district"].lower():
-            items.append({
-                "osm_id": f"way/{wb['id']}",
-                "name": wb["name"],
-                "kind": wb["kind"],
-                "osm_water_tag": wb["kind"],
-                "area_km2": wb["area_km2"],
-                "suggested_tier": wb["tier"],
-                "centroid": wb["centroid"],
-                "bbox": wb["bbox"],
-                "distance_km": 0.0,
-                "geometry": wb["boundary"],
-                "already_registered_id": wb["id"],
-            })
+            items.append(
+                {
+                    "osm_id": f"way/{wb['id']}",
+                    "name": wb["name"],
+                    "kind": wb["kind"],
+                    "osm_water_tag": wb["kind"],
+                    "area_km2": wb["area_km2"],
+                    "suggested_tier": wb["tier"],
+                    "centroid": wb["centroid"],
+                    "bbox": wb["bbox"],
+                    "distance_km": 0.0,
+                    "geometry": wb["boundary"],
+                    "already_registered_id": wb["id"],
+                }
+            )
     return {
         "query": req.get("query", ""),
         "resolved_place": "Maharashtra, India",
@@ -733,6 +825,7 @@ async def search_and_discover(req: dict[str, Any]):
         "total": len(items),
     }
 
+
 @app.post("/api/v1/water-bodies/import-dynamic")
 async def import_dynamic(req: dict[str, Any]):
     name = req.get("name", "New Water Body")
@@ -740,7 +833,7 @@ async def import_dynamic(req: dict[str, Any]):
     geom = req.get("geometry", {})
     bbox, centroid, area_km2 = _calc_bbox_and_centroid(geom)
     zones = _generate_zones(wb_id, name, bbox, centroid, area_km2)
-    
+
     WATER_BODIES[wb_id] = {
         "id": wb_id,
         "name": name,
@@ -766,7 +859,7 @@ async def import_dynamic(req: dict[str, Any]):
             "cloud_pct": 3.2,
             "usable": True,
             "stage": "indicators",
-        }
+        },
     }
     return {
         "water_body_id": wb_id,
@@ -777,54 +870,80 @@ async def import_dynamic(req: dict[str, Any]):
         "n_zones": len(zones),
     }
 
-@app.get("/api/v1/water-bodies/{id}")
-async def get_water_body(id: str):
-    if id not in WATER_BODIES:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Water body '{id}' not found")
-    wb = WATER_BODIES[id]
-    if id not in RECENT_HISTORY:
-        RECENT_HISTORY.insert(0, id)
+
+@app.get("/api/v1/water-bodies/{water_body_id}")
+async def get_water_body(water_body_id: str) -> dict[str, Any]:
+    if water_body_id not in WATER_BODIES:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Water body '{water_body_id}' not found"
+        )
+    wb = WATER_BODIES[water_body_id]
+    if water_body_id not in RECENT_HISTORY:
+        RECENT_HISTORY.insert(0, water_body_id)
     return wb
 
-@app.get("/api/v1/water-bodies/{id}/observations")
-async def get_observations(id: str):
-    if id not in WATER_BODIES:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Water body '{id}' not found")
-    
-    base_dates = ["2026-10-20", "2026-10-15", "2026-10-10", "2026-10-05", "2026-09-30", "2026-09-25", "2026-09-20"]
-    items = []
-    for i, d in enumerate(base_dates):
-        items.append({
-            "scene_id": f"S2C_43QCA_{d.replace('-', '')}_0_L2A",
-            "observed_on": d,
-            "sensed_at": f"{d}T05:31:12Z",
-            "platform": "sentinel-2c",
-            "cloud_pct": round(4.0 + (i * 3.1) % 15.0, 1),
-            "usable": True,
-            "valid_pixel_pct": round(96.0 - (i * 2.5) % 12.0, 1),
-            "water_extent_km2": round(WATER_BODIES[id]["area_km2"] * (0.95 - (i * 0.01)), 2),
-            "stage": "alerted" if (i == 0 and "khadakwasla" in id) else "indicators",
-            "source": "earth-search",
-        })
-    return {"water_body_id": id, "items": items, "total": len(items), "next_cursor": None}
 
-@app.get("/api/v1/water-bodies/{id}/indicators")
-async def get_indicators(id: str, date: str | None = None):
-    if id not in WATER_BODIES:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Water body '{id}' not found")
-    
-    wb = WATER_BODIES[id]
-    zones_data = wb["zones"]["features"]
-    is_anomaly = "khadakwasla" in id or "futala" in id
+@app.get("/api/v1/water-bodies/{water_body_id}/observations")
+async def get_observations(water_body_id: str) -> dict[str, Any]:
+    if water_body_id not in WATER_BODIES:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Water body '{water_body_id}' not found"
+        )
+
+    base_dates = [
+        "2026-10-20",
+        "2026-10-15",
+        "2026-10-10",
+        "2026-10-05",
+        "2026-09-30",
+        "2026-09-25",
+        "2026-09-20",
+    ]
+    items = []
+    wb = WATER_BODIES[water_body_id]
+    area = float(wb.get("area_km2", 10.0))
+    for i, d in enumerate(base_dates):
+        items.append(
+            {
+                "scene_id": f"S2C_43QCA_{d.replace('-', '')}_0_L2A",
+                "observed_on": d,
+                "sensed_at": f"{d}T05:31:12Z",
+                "platform": "sentinel-2c",
+                "cloud_pct": round(4.0 + (i * 3.1) % 15.0, 1),
+                "usable": True,
+                "valid_pixel_pct": round(96.0 - (i * 2.5) % 12.0, 1),
+                "water_extent_km2": round(area * (0.95 - (i * 0.01)), 2),
+                "stage": "alerted" if (i == 0 and "khadakwasla" in water_body_id) else "indicators",
+                "source": "earth-search",
+            }
+        )
+    return {
+        "water_body_id": water_body_id,
+        "items": items,
+        "total": len(items),
+        "next_cursor": None,
+    }
+
+
+@app.get("/api/v1/water-bodies/{water_body_id}/indicators")
+async def get_indicators(water_body_id: str, date: str | None = None) -> dict[str, Any]:
+    if water_body_id not in WATER_BODIES:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Water body '{water_body_id}' not found"
+        )
+
+    wb = WATER_BODIES[water_body_id]
+    zones_data = wb.get("zones", {}).get("features", [])
+    is_anomaly = "khadakwasla" in water_body_id or "futala" in water_body_id
     zone_results = []
-    
+
     for i, z in enumerate(zones_data):
         z_id = z["properties"]["id"]
         z_name = z["properties"]["name"]
-        
+
         turbidity_val = 0.28 if (is_anomaly and i == 0) else 0.02
         z_score_turb = 5.5 if (is_anomaly and i == 0) else 0.4
-        
+
         indicators = [
             {
                 "key": "ndti_turbidity",
@@ -907,14 +1026,16 @@ async def get_indicators(id: str, date: str | None = None):
                 "scientific_basis": "Green-to-SWIR difference ratio for water delineation.",
             },
         ]
-        
-        zone_results.append({
-            "zone_id": z_id,
-            "zone_name": z_name,
-            "indicators": indicators,
-            "rejected": [],
-        })
-        
+
+        zone_results.append(
+            {
+                "zone_id": z_id,
+                "zone_name": z_name,
+                "indicators": indicators,
+                "rejected": [],
+            }
+        )
+
     return {
         "water_body_id": id,
         "requested_date": date or "2026-10-20",
@@ -925,32 +1046,50 @@ async def get_indicators(id: str, date: str | None = None):
         "disclaimer": DISCLAIMER,
     }
 
-@app.get("/api/v1/water-bodies/{id}/series")
-async def get_series(id: str, indicator: str = "ndti_turbidity", zone: str | None = None, from_: str | None = Query(None, alias="from"), to: str | None = None):
+
+@app.get("/api/v1/water-bodies/{water_body_id}/series")
+async def get_series(
+    water_body_id: str,
+    indicator: str = "ndti_turbidity",
+    zone: str | None = None,
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = None,
+) -> dict[str, Any]:
     """Historical time-series matching SeriesResponse contract."""
-    wb = WATER_BODIES.get(id)
-    zone_id = zone or (wb["zones"]["features"][0]["properties"]["id"] if wb and wb.get("zones") else f"{id}_z1")
-    
+    if water_body_id not in WATER_BODIES:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Water body '{water_body_id}' not found"
+        )
+    wb = WATER_BODIES[water_body_id]
+    zones_feat = wb.get("zones", {}).get("features", [])
+    zone_id = zone or (zones_feat[0]["properties"]["id"] if zones_feat else f"{water_body_id}_z1")
+
     points = []
     today = date(2026, 10, 20)
     for d_offset in range(30, -1, -3):
         dt = today - timedelta(days=d_offset)
         iso_date = dt.isoformat()
-        is_spike = d_offset == 0 and ("khadakwasla" in id or "futala" in id) and indicator in ("ndti_turbidity", "turbidity")
+        is_spike = (
+            d_offset == 0
+            and ("khadakwasla" in water_body_id or "futala" in water_body_id)
+            and indicator in ("ndti_turbidity", "turbidity")
+        )
         v = 0.28 if is_spike else round(0.01 + math.sin(d_offset * 0.3) * 0.03, 3)
-        points.append({
-            "observed_at": f"{iso_date}T05:30:00Z",
-            "scene_id": f"S2C_43QCA_{iso_date.replace('-', '')}_0_L2A",
-            "value": v,
-            "p90": v + 0.03,
-            "valid_pixel_pct": 98.0,
-            "baseline_mean": 0.02,
-            "baseline_p10": -0.04,
-            "baseline_p90": 0.07,
-            "baseline_status": "usable",
-            "z_score": 5.5 if is_spike else 0.3,
-        })
-    
+        points.append(
+            {
+                "observed_at": f"{iso_date}T05:30:00Z",
+                "scene_id": f"S2C_43QCA_{iso_date.replace('-', '')}_0_L2A",
+                "value": v,
+                "p90": v + 0.03,
+                "valid_pixel_pct": 98.0,
+                "baseline_mean": 0.02,
+                "baseline_p10": -0.04,
+                "baseline_p90": 0.07,
+                "baseline_status": "usable",
+                "z_score": 5.5 if is_spike else 0.3,
+            }
+        )
+
     return {
         "water_body_id": id,
         "zone_id": zone_id,
@@ -966,6 +1105,7 @@ async def get_series(id: str, indicator: str = "ndti_turbidity", zone: str | Non
         "disclaimer": DISCLAIMER,
     }
 
+
 # ---------------------------------------------------------------------------
 # Alerts API
 # ---------------------------------------------------------------------------
@@ -973,110 +1113,133 @@ async def get_series(id: str, indicator: str = "ndti_turbidity", zone: str | Non
 async def list_alerts():
     items = []
     for a in ALERTS.values():
-        items.append({
-            "alert_id": a["alert_id"],
-            "water_body": a["water_body"],
-            "zone": a["zone"],
-            "observed_on": a["observed_on"],
-            "primary_indicator": a["primary_indicator"],
-            "severity": a["severity"],
-            "confidence": a["confidence"],
-            "priority_score": a["priority_score"],
-            "status": a["status"],
-            "natural_cause_likely": a["natural_cause_likely"],
-            "affected_area_km2": a["affected_area_km2"],
-            "summary": a["summary"],
-            "n_observations": a["n_observations"],
-            "disclaimer": a["disclaimer"],
-        })
+        items.append(
+            {
+                "alert_id": a["alert_id"],
+                "water_body": a["water_body"],
+                "zone": a["zone"],
+                "observed_on": a["observed_on"],
+                "primary_indicator": a["primary_indicator"],
+                "severity": a["severity"],
+                "confidence": a["confidence"],
+                "priority_score": a["priority_score"],
+                "status": a["status"],
+                "natural_cause_likely": a["natural_cause_likely"],
+                "affected_area_km2": a["affected_area_km2"],
+                "summary": a["summary"],
+                "n_observations": a["n_observations"],
+                "disclaimer": a["disclaimer"],
+            }
+        )
     return {"items": items, "total": len(items), "disclaimer": DISCLAIMER}
+
 
 @app.get("/api/v1/alerts.geojson")
 async def get_alerts_geojson():
     features = []
     for a in ALERTS.values():
-        features.append({
-            "type": "Feature",
-            "id": a["alert_id"],
-            "geometry": {
-                "type": "Point",
-                "coordinates": a["zone"]["centroid"],
-            },
-            "properties": {
-                "alert_id": a["alert_id"],
-                "water_body_id": a["water_body"]["id"],
-                "water_body_name": a["water_body"]["name"],
-                "zone_name": a["zone"]["name"],
-                "severity": a["severity"],
-                "priority_score": a["priority_score"],
-                "primary_indicator": a["primary_indicator"],
-                "status": a["status"],
+        features.append(
+            {
+                "type": "Feature",
+                "id": a["alert_id"],
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": a["zone"]["centroid"],
+                },
+                "properties": {
+                    "alert_id": a["alert_id"],
+                    "water_body_id": a["water_body"]["id"],
+                    "water_body_name": a["water_body"]["name"],
+                    "zone_name": a["zone"]["name"],
+                    "severity": a["severity"],
+                    "priority_score": a["priority_score"],
+                    "primary_indicator": a["primary_indicator"],
+                    "status": a["status"],
+                },
             }
-        })
+        )
     return {"type": "FeatureCollection", "features": features, "disclaimer": DISCLAIMER}
 
-@app.get("/api/v1/alerts/{id}")
-async def get_alert(id: str):
-    if id not in ALERTS:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Alert '{id}' not found")
-    return ALERTS[id]
+
+@app.get("/api/v1/alerts/{alert_id}")
+async def get_alert(alert_id: str) -> dict[str, Any]:
+    if alert_id not in ALERTS:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Alert '{alert_id}' not found"
+        )
+    return ALERTS[alert_id]
+
 
 class StatusUpdate(BaseModel):
     status: Literal["open", "investigating", "validated", "dismissed"]
     note: str | None = None
     by: str | None = None
 
-@app.patch("/api/v1/alerts/{id}/status")
-async def update_alert_status(id: str, body: StatusUpdate):
-    if id not in ALERTS:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Alert '{id}' not found")
-    ALERTS[id]["status"] = body.status
-    ALERTS[id]["updated_at"] = datetime.now(UTC).isoformat()
-    return ALERTS[id]
 
-@app.get("/api/v1/alerts/{id}/brief.pdf")
-async def get_alert_brief(id: str):
-    alert = ALERTS.get(id)
-    if not alert:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Alert '{id}' not found")
+@app.patch("/api/v1/alerts/{alert_id}/status")
+async def update_alert_status(alert_id: str, body: StatusUpdate) -> dict[str, Any]:
+    if alert_id not in ALERTS:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Alert '{alert_id}' not found"
+        )
+    ALERTS[alert_id]["status"] = body.status
+    ALERTS[alert_id]["updated_at"] = datetime.now(UTC).isoformat()
+    return ALERTS[alert_id]
+
+
+@app.get("/api/v1/alerts/{alert_id}/brief.pdf")
+async def get_alert_brief(alert_id: str) -> Response:
+    if alert_id not in ALERTS:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Alert '{alert_id}' not found"
+        )
+    alert = ALERTS[alert_id]
+    wb = alert.get("water_body", {})
+    zone = alert.get("zone", {})
     lines = [
-        f"Alert ID: {alert['alert_id']}",
-        f"Water Body: {alert['water_body']['name']} ({alert['water_body']['district']})",
-        f"Zone: {alert['zone']['name']}",
-        f"Observed on: {alert['observed_on']}",
-        f"Priority Score: {alert['priority_score']} ({alert['severity'].upper()})",
-        f"Primary Indicator: {alert['primary_indicator']}",
-        f"Confidence: {alert['confidence']}",
-        f"Affected Area: {alert['affected_area_km2']} sq km",
-        f"Summary: {alert['summary']}",
+        f"Alert ID: {alert.get('alert_id', alert_id)}",
+        f"Water Body: {wb.get('name', 'Unknown')} ({wb.get('district', '')})",
+        f"Zone: {zone.get('name', '')}",
+        f"Observed on: {alert.get('observed_on', '')}",
+        f"Priority Score: {alert.get('priority_score', 0)} ({str(alert.get('severity', '')).upper()})",
+        f"Primary Indicator: {alert.get('primary_indicator', '')}",
+        f"Confidence: {alert.get('confidence', 0)}",
+        f"Affected Area: {alert.get('affected_area_km2', 0)} sq km",
+        f"Summary: {alert.get('summary', '')}",
         "",
         DISCLAIMER,
     ]
-    pdf_bytes = make_simple_pdf("JalNetra — Investigation Brief", lines)
+    pdf_bytes = make_simple_pdf("JalNetra - Investigation Brief", lines)
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f"inline; filename=alert_{id}_brief.pdf"},
+        headers={"Content-Disposition": f"inline; filename=alert_{alert_id}_brief.pdf"},
     )
 
-@app.get("/api/v1/alerts/{id}/geometry.geojson")
-async def get_alert_geometry(id: str):
-    alert = ALERTS.get(id)
-    if not alert:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Alert '{id}' not found")
+
+@app.get("/api/v1/alerts/{alert_id}/geometry.geojson")
+async def get_alert_geometry(alert_id: str) -> dict[str, Any]:
+    if alert_id not in ALERTS:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Alert '{alert_id}' not found"
+        )
+    alert = ALERTS[alert_id]
+    zone = alert.get("zone", {})
+    wb = alert.get("water_body", {})
     return {
         "type": "Feature",
-        "id": id,
+        "id": alert_id,
         "geometry": {
             "type": "Point",
-            "coordinates": alert["zone"]["centroid"],
+            "coordinates": zone.get("centroid", [73.7, 18.4]),
         },
         "properties": {
-            "alert_id": id,
-            "severity": alert["severity"],
-            "water_body_id": alert["water_body"]["id"],
-        }
+            "alert_id": alert_id,
+            "severity": alert.get("severity", "low"),
+            "water_body_id": wb.get("id", ""),
+        },
     }
+
 
 # ---------------------------------------------------------------------------
 # IoT Telemetry & Analysis
@@ -1089,17 +1252,28 @@ async def iot_live():
             r = await client.get(IOT_ENDPOINT)
             if r.status_code == 200:
                 data = r.json()
-                return {"online": True, "status": "online", "data": data, "fetched_at": datetime.now(UTC).isoformat()}
+                return {
+                    "online": True,
+                    "status": "online",
+                    "data": data,
+                    "fetched_at": datetime.now(UTC).isoformat(),
+                }
     except Exception as exc:
         log.debug(f"IoT Buoy offline at {IOT_ENDPOINT}: {exc}")
-    
+
     # Return simulated live pilot telemetry so gauges and AI analysis illuminate seamlessly
     simulated_telemetry = {
         "device": "ESP32-JalNetra-01 (Khadakwasla Buoy)",
         "timestamp_ms": int(datetime.now(UTC).timestamp() * 1000),
         "temperature": {"value": 23.4, "unit": "°C"},
         "tds": {"value": 182.0, "unit": "ppm", "adc": 820, "voltage": 1.25},
-        "turbidity": {"value": 3.92, "unit": "V", "adc": 3210, "voltage": 3.92, "status": "Crystal Clear"},
+        "turbidity": {
+            "value": 3.92,
+            "unit": "V",
+            "adc": 3210,
+            "voltage": 3.92,
+            "status": "Crystal Clear",
+        },
         "wifi": {"rssi": -64, "ip": "192.168.244.250"},
     }
     return {
@@ -1110,14 +1284,20 @@ async def iot_live():
         "error": None,
     }
 
+
 class IotAnalyzeReq(BaseModel):
     water_body_name: str
     telemetry: dict[str, Any]
 
+
+_openai_available = bool(OPENAI_API_KEY)
+
+
 @app.post("/api/v1/iot/analyze")
 async def iot_analyze(req: IotAnalyzeReq):
     """Analyze buoy sensor readings via OpenAI GPT-4o-mini with reliable offline fallback."""
-    if OPENAI_API_KEY:
+    global _openai_available
+    if OPENAI_API_KEY and _openai_available:
         prompt = (
             f"You are JalNetra Limnologist AI. Analyze this buoy telemetry for {req.water_body_name}:\n"
             f"{json.dumps(req.telemetry, indent=2)}\n\n"
@@ -1125,14 +1305,17 @@ async def iot_analyze(req: IotAnalyzeReq):
             "suggestions (list of 3 strings), and future_prediction."
         )
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(timeout=8.0) as client:
                 r = await client.post(
                     "https://api.openai.com/v1/chat/completions",
                     headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
                     json={
                         "model": OPENAI_MODEL,
                         "messages": [
-                            {"role": "system", "content": "You are JalNetra water quality AI. Respond with JSON."},
+                            {
+                                "role": "system",
+                                "content": "You are JalNetra water quality AI. Respond with JSON.",
+                            },
                             {"role": "user", "content": prompt},
                         ],
                         "response_format": {"type": "json_object"},
@@ -1141,16 +1324,21 @@ async def iot_analyze(req: IotAnalyzeReq):
                 if r.status_code == 200:
                     content = r.json()["choices"][0]["message"]["content"]
                     return json.loads(content)
+                elif r.status_code in (401, 403):
+                    log.info(
+                        "OpenAI API key invalid or expired; switching to local limnologist engine."
+                    )
+                    _openai_available = False
                 else:
                     log.warning(f"OpenAI error {r.status_code}: {r.text}")
         except Exception as exc:
             log.warning(f"OpenAI API call failed: {exc}")
-    
+
     # Reliable limnologist evaluation
     temp_val = req.telemetry.get("temperature", {}).get("value", 23.4)
     turb_val = req.telemetry.get("turbidity", {}).get("value", 3.9)
     tds_val = req.telemetry.get("tds", {}).get("value", 182.0)
-    
+
     return {
         "condition_summary": (
             f"Sensor telemetry for {req.water_body_name} indicates nominal post-monsoon conditions. "
@@ -1166,8 +1354,9 @@ async def iot_analyze(req: IotAnalyzeReq):
             "Inspect physical optical window during weekly reservoir perimeter patrol.",
             "Corroborate next Sentinel-2 satellite pass with in-situ sensor readings.",
         ],
-        "future_prediction": "Water quality metrics are projected to remain in the 'Good' to 'Excellent' tier over the next 7-10 days."
+        "future_prediction": "Water quality metrics are projected to remain in the 'Good' to 'Excellent' tier over the next 7-10 days.",
     }
+
 
 # ---------------------------------------------------------------------------
 # Methodology & Documentation API
@@ -1193,7 +1382,10 @@ async def get_methodology():
             "key": "water_detection",
             "title": "Water-body detection",
             "summary": "Cloud/shadow masked from SCL, then Otsu MNDWI inside registered outline (+60 m).",
-            "details": ["MNDWI = (green - SWIR) / (green + SWIR)", "Morphological cleanup and minimum component filtering."],
+            "details": [
+                "MNDWI = (green - SWIR) / (green + SWIR)",
+                "Morphological cleanup and minimum component filtering.",
+            ],
             "parameters": {"outline_buffer_m": 60},
         },
         "indicators": [
@@ -1264,7 +1456,10 @@ async def get_methodology():
             "key": "anomaly",
             "title": "Intelligent anomaly detection",
             "summary": "Temporal robust z-score, spatial DBSCAN plume clustering, and multivariate IsolationForest voting.",
-            "details": ["Three independent detectors vote.", "Rainfall discount for natural runoff."],
+            "details": [
+                "Three independent detectors vote.",
+                "Rainfall discount for natural runoff.",
+            ],
             "parameters": {},
         },
         "prioritisation": {
@@ -1302,6 +1497,7 @@ async def get_methodology():
         ],
     }
 
+
 # ---------------------------------------------------------------------------
 # Wishlist, History, Live Imagery
 # ---------------------------------------------------------------------------
@@ -1311,9 +1507,49 @@ async def get_wishlist():
     for w in WISHLIST:
         wb_id = w.get("water_body_id", "")
         wb = WATER_BODIES.get(wb_id)
-        summary = _wb_summary(wb) if wb else {
+        summary = (
+            _wb_summary(wb)
+            if wb
+            else {
+                "id": wb_id,
+                "name": w.get("custom_name", wb_id),
+                "district": "Maharashtra",
+                "kind": "reservoir",
+                "tier": 1,
+                "area_km2": 5.0,
+                "centroid": [73.5, 18.5],
+                "bbox": [73.4, 18.4, 73.6, 18.6],
+                "n_zones": 4,
+                "latest_observation": None,
+                "status": "normal",
+                "open_alerts": 0,
+                "max_open_severity": None,
+                "baseline_status": "usable",
+            }
+        )
+        items.append(
+            {
+                "id": w["id"],
+                "water_body_id": wb_id,
+                "custom_name": w.get("custom_name") or summary["name"],
+                "notes": w.get("notes"),
+                "created_at": w.get("created_at", datetime.now(UTC).isoformat()),
+                "water_body": summary,
+            }
+        )
+    return {"items": items, "total": len(items)}
+
+
+@app.post("/api/v1/wishlist")
+async def add_wishlist(req: dict[str, Any]):
+    wb_id = req.get("water_body_id", "")
+    wb = WATER_BODIES.get(wb_id)
+    summary = (
+        _wb_summary(wb)
+        if wb
+        else {
             "id": wb_id,
-            "name": w.get("custom_name", wb_id),
+            "name": req.get("custom_name", wb_id),
             "district": "Maharashtra",
             "kind": "reservoir",
             "tier": 1,
@@ -1327,36 +1563,7 @@ async def get_wishlist():
             "max_open_severity": None,
             "baseline_status": "usable",
         }
-        items.append({
-            "id": w["id"],
-            "water_body_id": wb_id,
-            "custom_name": w.get("custom_name") or summary["name"],
-            "notes": w.get("notes"),
-            "created_at": w.get("created_at", datetime.now(UTC).isoformat()),
-            "water_body": summary,
-        })
-    return {"items": items, "total": len(items)}
-
-@app.post("/api/v1/wishlist")
-async def add_wishlist(req: dict[str, Any]):
-    wb_id = req.get("water_body_id", "")
-    wb = WATER_BODIES.get(wb_id)
-    summary = _wb_summary(wb) if wb else {
-        "id": wb_id,
-        "name": req.get("custom_name", wb_id),
-        "district": "Maharashtra",
-        "kind": "reservoir",
-        "tier": 1,
-        "area_km2": 5.0,
-        "centroid": [73.5, 18.5],
-        "bbox": [73.4, 18.4, 73.6, 18.6],
-        "n_zones": 4,
-        "latest_observation": None,
-        "status": "normal",
-        "open_alerts": 0,
-        "max_open_severity": None,
-        "baseline_status": "usable",
-    }
+    )
     item = {
         "id": len(WISHLIST) + 1,
         "water_body_id": wb_id,
@@ -1368,11 +1575,13 @@ async def add_wishlist(req: dict[str, Any]):
     WISHLIST.append(item)
     return item
 
+
 @app.delete("/api/v1/wishlist/{item_id}")
 async def remove_wishlist(item_id: int):
     global WISHLIST
     WISHLIST = [w for w in WISHLIST if w["id"] != item_id]
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
 
 @app.get("/api/v1/history/recent")
 async def get_recent():
@@ -1380,13 +1589,16 @@ async def get_recent():
     for r_id in RECENT_HISTORY[:10]:
         if r_id in WATER_BODIES:
             wb = WATER_BODIES[r_id]
-            items.append({
-                "water_body_id": wb["id"],
-                "last_viewed_at": datetime.now(UTC).isoformat(),
-                "wishlisted": any(w.get("water_body_id") == wb["id"] for w in WISHLIST),
-                "water_body": _wb_summary(wb),
-            })
+            items.append(
+                {
+                    "water_body_id": wb["id"],
+                    "last_viewed_at": datetime.now(UTC).isoformat(),
+                    "wishlisted": any(w.get("water_body_id") == wb["id"] for w in WISHLIST),
+                    "water_body": _wb_summary(wb),
+                }
+            )
     return {"items": items, "total": len(items)}
+
 
 @app.post("/api/v1/history/recent/{water_body_id}")
 async def touch_recent(water_body_id: str):
@@ -1394,6 +1606,7 @@ async def touch_recent(water_body_id: str):
         RECENT_HISTORY.remove(water_body_id)
     RECENT_HISTORY.insert(0, water_body_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
 
 # ---------------------------------------------------------------------------
 # Live Satellite Imagery (GEE & High-Res Satellite XYZ)
@@ -1454,6 +1667,7 @@ async def imagery_status():
         ],
     }
 
+
 @app.get("/api/v1/imagery/live")
 async def live_imagery(
     bbox: str = Query(..., description="minx,miny,maxx,maxy"),
@@ -1478,12 +1692,14 @@ async def live_imagery(
         "cached": True,
     }
 
+
 # ---------------------------------------------------------------------------
 # Validations API
 # ---------------------------------------------------------------------------
 @app.get("/api/v1/validations")
 async def list_validations():
     return {"items": [], "total": 0}
+
 
 @app.get("/api/v1/validations/summary")
 async def validation_summary():
@@ -1496,6 +1712,7 @@ async def validation_summary():
         "retrained_models": 1,
     }
 
+
 @app.post("/api/v1/validations")
 async def create_validation(body: dict[str, Any]):
     return {
@@ -1505,6 +1722,7 @@ async def create_validation(body: dict[str, Any]):
         "notes": body.get("notes"),
         "submitted_at": datetime.now(UTC).isoformat(),
     }
+
 
 # ---------------------------------------------------------------------------
 # Jobs & Pipeline Runner API
@@ -1518,9 +1736,11 @@ STAGES_PROGRESS = [
     {"stage": "alerts", "done": 5, "total": 5, "pct": 100.0},
 ]
 
+
 @app.get("/api/v1/jobs")
 async def list_jobs():
     return {"items": [], "total": 0}
+
 
 @app.post("/api/v1/jobs/ingest")
 async def start_ingest_job(req: dict[str, Any]):
@@ -1547,6 +1767,7 @@ async def start_ingest_job(req: dict[str, Any]):
         "updated_at": now_iso,
         "finished_at": now_iso,
     }
+
 
 @app.get("/api/v1/jobs/{job_id}")
 async def get_job(job_id: str):
@@ -1576,6 +1797,7 @@ async def get_job(job_id: str):
         "finished_at": now_iso,
     }
 
+
 @app.get("/api/v1/jobs/{job_id}/report.pdf")
 async def get_job_report_pdf(job_id: str):
     lines = [
@@ -1597,6 +1819,7 @@ async def get_job_report_pdf(job_id: str):
         headers={"Content-Disposition": f"attachment; filename={job_id}_report.pdf"},
     )
 
+
 @app.get("/api/v1/jobs/{job_id}/report.csv")
 async def get_job_report_csv(job_id: str):
     csv_content = (
@@ -1612,6 +1835,7 @@ async def get_job_report_csv(job_id: str):
         headers={"Content-Disposition": f"attachment; filename={job_id}_report.csv"},
     )
 
+
 # ---------------------------------------------------------------------------
 # Background Telegram Bot Polling
 # ---------------------------------------------------------------------------
@@ -1619,7 +1843,7 @@ async def run_telegram_bot_poller():
     if not TELEGRAM_BOT_TOKEN:
         log.info("Telegram bot token not provided, skipping Telegram bot poller.")
         return
-    
+
     log.info("Starting Telegram Bot poller for JalNetra...")
     offset = 0
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -1636,9 +1860,9 @@ async def run_telegram_bot_poller():
                             continue
                         chat_id = msg["chat"]["id"]
                         text = msg.get("text", "").strip()
-                        
+
                         log.info(f"Telegram message received from chat {chat_id}: {text}")
-                        
+
                         reply = "Welcome to JalNetra! Ask me about any water body in Maharashtra, e.g. /status Khadakwasla or /alerts."
                         if text.startswith("/start") or text.startswith("/help"):
                             reply = (
@@ -1653,9 +1877,9 @@ async def run_telegram_bot_poller():
                         elif text.startswith("/alerts"):
                             reply = (
                                 "🚨 *Active Alerts:*\n"
-                                "• *Khadakwasla Reservoir* (Zone 1 — Inflow)\n"
+                                "• *Khadakwasla Reservoir* (Zone 1 - Inflow)\n"
                                 "  Priority: 84.5 (High)\n"
-                                "  NDTI Turbidity: +5.50σ deviation\n"
+                                "  NDTI Turbidity: +5.50 sigma deviation\n"
                                 "  Area: 2.45 km² affected\n"
                                 "  Status: Open"
                             )
@@ -1667,20 +1891,31 @@ async def run_telegram_bot_poller():
                                 "Water Temp: 23.4 °C | TDS: 182 ppm | Turbidity: 3.92 V (Crystal Clear)"
                             )
                         elif text.startswith("/list"):
-                            reply = "Monitored Reservoirs:\n• Khadakwasla\n• Panshet\n• Varasgaon\n• Temghar\n• Mulshi\n• Ambazari (Nagpur)\n• Gorewada (Nagpur)\n• Futala Lake (Nagpur)"
-                        elif text.startswith("/status") or "khadakwasla" in text.lower() or "futala" in text.lower():
+                            reply = (
+                                "Monitored Reservoirs:\n"
+                                "• Khadakwasla\n• Panshet\n• Varasgaon\n• Temghar\n"
+                                "• Mulshi\n• Ambazari (Nagpur)\n• Gorewada (Nagpur)\n• Futala Lake (Nagpur)"
+                            )
+                        elif (
+                            text.startswith("/status")
+                            or "khadakwasla" in text.lower()
+                            or "futala" in text.lower()
+                        ):
                             reply = (
                                 "💧 *Water Body Status Report:*\n"
                                 "• Reservoir: Khadakwasla Reservoir\n"
                                 "• Status: ⚠️ Elevated Turbidity Alert\n"
                                 "• Area: 19.6 km² | Tier: 1 (Drinking Water)\n"
-                                "• Turbidity (NDTI): 0.28 (+5.50σ)\n"
+                                "• Turbidity (NDTI): 0.28 (+5.50 sigma)\n"
                                 "• Chlorophyll (NDCI): 0.06 (Normal)\n"
                                 "• Water Extent: 94.5% normal capacity"
                             )
-                        
+
                         send_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-                        await client.post(send_url, json={"chat_id": chat_id, "text": reply, "parse_mode": "Markdown"})
+                        await client.post(
+                            send_url,
+                            json={"chat_id": chat_id, "text": reply, "parse_mode": "Markdown"},
+                        )
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -1688,11 +1923,17 @@ async def run_telegram_bot_poller():
                 await asyncio.sleep(5)
             await asyncio.sleep(1)
 
+
+_background_tasks: set[asyncio.Task[Any]] = set()
+
+
 @app.on_event("startup")
-async def on_startup():
+async def on_startup() -> None:
     log.info(f"JalNetra API Server running on http://{API_HOST}:{API_PORT}")
-    asyncio.create_task(run_telegram_bot_poller())
+    task = asyncio.create_task(run_telegram_bot_poller())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host=API_HOST, port=API_PORT)
-

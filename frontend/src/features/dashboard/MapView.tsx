@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import L from "leaflet";
-import { Layers, X } from "lucide-react";
+import { Info, Layers, X } from "lucide-react";
 import { GeoJSON, MapContainer, TileLayer, useMap } from "react-leaflet";
 import type { Feature as GJFeature, FeatureCollection as GJFeatureCollection, Geometry as GJGeometry } from "geojson";
 import { useAlertsGeo, useWaterBody } from "@/api/hooks";
@@ -74,6 +74,7 @@ export function MapView() {
   const body = useWaterBody(waterBodyId);
   const alerts = useAlertsGeo({ status: "active" });
   const [layersOpen, setLayersOpen] = useState(false);
+  const [disclaimerVisible, setDisclaimerVisible] = useState(true);
   // Shared with the top bar's place autocomplete (WaterBodyBar) so either
   // search box flies the map and shows the same discovered water bodies.
   const searchResult = useUi((s) => s.search);
@@ -175,10 +176,24 @@ export function MapView() {
         </button>
         {layersOpen && <LayerToggles disabled={!waterBodyId || !date} />}
       </div>
-      {alerts.data && (
+      {alerts.data && disclaimerVisible && (
         <div className="absolute bottom-3 left-3 z-[1000] max-w-md">
-          <Disclaimer text={alerts.data.disclaimer} className="bg-amber-50/95 shadow" />
+          <Disclaimer
+            text={alerts.data.disclaimer}
+            className="shadow-md"
+            onDismiss={() => setDisclaimerVisible(false)}
+          />
         </div>
+      )}
+      {alerts.data && !disclaimerVisible && (
+        <button
+          type="button"
+          onClick={() => setDisclaimerVisible(true)}
+          className="absolute bottom-3 left-3 z-[1000] flex items-center gap-1.5 rounded-md border bg-card/95 px-2.5 py-1 text-xs font-medium text-muted-foreground shadow hover:bg-accent hover:text-foreground"
+          title="Show scientific advisory notice"
+        >
+          <Info className="h-3.5 w-3.5 text-sky-600" /> Advisory Notice
+        </button>
       )}
     </div>
   );

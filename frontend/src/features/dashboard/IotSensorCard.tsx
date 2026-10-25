@@ -281,15 +281,27 @@ export function IotSensorCard({ waterBody }: { waterBody: WaterBodyDetail | null
           </div>
 
           <div className="border-t pt-3">
-            <Button
-              size="sm"
-              className="bg-gradient-to-r from-primary to-sky-600 text-primary-foreground hover:opacity-90"
-              disabled={analyze.isPending || !data}
-              onClick={runAnalysis}
-            >
-              <Sparkles className="h-3.5 w-3.5" />
-              {analyze.isPending ? "Analyzing…" : "Run AI Water Analysis"}
-            </Button>
+            <div className="flex items-center justify-between gap-2">
+              <Button
+                size="sm"
+                className="bg-gradient-to-r from-primary to-sky-600 text-primary-foreground hover:opacity-90"
+                disabled={analyze.isPending || !data}
+                onClick={runAnalysis}
+              >
+                <Sparkles className="h-3.5 w-3.5" />
+                {analyze.isPending ? "Analyzing telemetry…" : "Run AI Water Analysis"}
+              </Button>
+              {showAnalysis && analyze.data && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="text-xs text-muted-foreground"
+                  onClick={() => setShowAnalysis(false)}
+                >
+                  Hide analysis
+                </Button>
+              )}
+            </div>
             {analyze.error && (
               <p className="mt-2 text-xs text-destructive">Could not analyze: {analyze.error.message}</p>
             )}

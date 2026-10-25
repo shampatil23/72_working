@@ -1037,7 +1037,7 @@ async def get_indicators(water_body_id: str, date: str | None = None) -> dict[st
         )
 
     return {
-        "water_body_id": id,
+        "water_body_id": water_body_id,
         "requested_date": date or "2026-10-20",
         "scene_id": "S2C_43QCA_20261020_0_L2A",
         "observed_on": date or "2026-10-20",
@@ -1091,7 +1091,7 @@ async def get_series(
         )
 
     return {
-        "water_body_id": id,
+        "water_body_id": water_body_id,
         "zone_id": zone_id,
         "indicator": indicator,
         "display_name": indicator,

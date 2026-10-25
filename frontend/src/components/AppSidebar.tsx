@@ -107,28 +107,35 @@ function WishlistSection() {
         <Star className="h-3 w-3 text-amber-500" />
       </div>
       <div className="mt-1 space-y-0.5">
-        {items.map((item: WishlistItemOut) => (
-          <SidebarRow
-            key={item.id}
-            label={item.custom_name}
-            caption={`${item.water_body.district} · ${fmtKm2(item.water_body.area_km2)} · ${statusLabel[item.water_body.status] ?? item.water_body.status}`}
-            status={item.water_body.status}
-            onClick={() => openDetails(item.water_body_id)}
-            trailing={
-              <button
-                className="shrink-0 rounded p-0.5 opacity-0 hover:bg-muted group-hover:opacity-100"
-                title="Remove from wishlist"
-                disabled={remove.isPending}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  remove.mutate(item.id);
-                }}
-              >
-                <X className="h-3 w-3 text-muted-foreground" />
-              </button>
-            }
-          />
-        ))}
+        {items.map((item: WishlistItemOut) => {
+          const wb = item.water_body;
+          const district = wb?.district ?? "";
+          const area = wb?.area_km2 ? fmtKm2(wb.area_km2) : "";
+          const st = wb?.status ?? "normal";
+          const caption = [district, area, statusLabel[st] ?? st].filter(Boolean).join(" · ");
+          return (
+            <SidebarRow
+              key={item.id}
+              label={item.custom_name || wb?.name || item.water_body_id}
+              caption={caption}
+              status={st}
+              onClick={() => openDetails(item.water_body_id)}
+              trailing={
+                <button
+                  className="shrink-0 rounded p-0.5 opacity-0 hover:bg-muted group-hover:opacity-100"
+                  title="Remove from wishlist"
+                  disabled={remove.isPending}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    remove.mutate(item.id);
+                  }}
+                >
+                  <X className="h-3 w-3 text-muted-foreground" />
+                </button>
+              }
+            />
+          );
+        })}
       </div>
     </div>
   );
@@ -147,15 +154,26 @@ function RecentHistorySection() {
         <Clock className="h-3 w-3 text-primary" />
       </div>
       <div className="mt-1 space-y-0.5">
-        {items.map((item: RecentItem) => (
-          <SidebarRow
-            key={item.water_body_id}
-            label={item.water_body.name}
-            caption={`${formatDistanceToNowStrict(new Date(item.last_viewed_at), { addSuffix: true })}${item.wishlisted ? " · saved" : ""}`}
-            status={item.water_body.status}
-            onClick={() => openDetails(item.water_body_id)}
-          />
-        ))}
+        {items.map((item: RecentItem) => {
+          const wb = item.water_body;
+          const dateStr = item.last_viewed_at;
+          let timeAgo = "";
+          try {
+            if (dateStr) timeAgo = formatDistanceToNowStrict(new Date(dateStr), { addSuffix: true });
+          } catch {
+            /* ignore invalid date */
+          }
+          const caption = `${timeAgo}${item.wishlisted ? " · saved" : ""}`;
+          return (
+            <SidebarRow
+              key={item.water_body_id}
+              label={wb?.name ?? item.water_body_id}
+              caption={caption}
+              status={wb?.status ?? "normal"}
+              onClick={() => openDetails(item.water_body_id)}
+            />
+          );
+        })}
       </div>
     </div>
   );
